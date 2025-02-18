@@ -1,1 +1,2 @@
-GEMINI_API_KEY=AIzaSyD-b-rXdmF2JiRIejQZywfzIp5OxnpCDNY
+env:
+GEMINI_API_KEY: ${{ secrets. GEMINI_API_KEY }}
