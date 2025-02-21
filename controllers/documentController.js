@@ -1,8 +1,10 @@
 const { PrismaClient } = require('@prisma/client');
 const { extractText } = require('../services/ocrService');
 const { convertToXML } = require('../utils/xmlFormatter');
-const fs = require('fs');
 const path = require('path');
+const vision = require('@google-cloud/vision');
+const { GoogleGenerativeAI } = require('@google/generative-ai');
+const fs = require('fs'); 
 
 const prisma = new PrismaClient();
 const natural = require('natural');
@@ -22,8 +24,8 @@ trainClassifier();
 
 // Helper function to extract court location
 const extractLocation = (text) => {
-  const stateAbbreviations = ['NY', 'CA', 'TX', 'FL']; // Add more as needed
-  const locationRegex = new RegExp(`\\b(${stateAbbreviations.join('|')})\\b`, 'g');
+  const stateAbbreviations = ['NY', 'New York', 'CA', 'California', 'TX', 'Texas', 'FL', 'Florida'];
+  const locationRegex = new RegExp(`\\b(?:${stateAbbreviations.join('|')})\\b`, 'g');
   const matches = text.match(locationRegex);
   return matches ? matches[0] : null;
 };
@@ -41,68 +43,117 @@ const extractCaseDetails = (text) => {
     caseNumber: text.match(/case\s*(?:no\.?|number)\s*[:.]?\s*(\w+[-/]\d+)/i)?.[1],
     plaintiffs: text.match(/plaintiff[s]?[\s:]+([^v.\n]+)/i)?.[1]?.trim(),
     defendants: text.match(/defendant[s]?[\s:]+([^\n]+)/i)?.[1]?.trim(),
+    claimants: text.match(/claimant[s]?[\s:]+([^\n]+)/i)?.[1]?.trim(),
+    //Extract Date from the data
+    filingDate: text.match(/filed\s*[:.]?\s*(\d{1,2}[stndrth]\s*[a-z]+\s*,\s*\d{4}|\d{2}-\d{2}-\d{4})/i)?.[1],
   };
 };
 
 // Upload Document
 exports.uploadDocument = async (req, res) => {
   try {
-    if (!req.file) return res.status(400).json({ error: "No file uploaded" });
+      const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 
-    const filePath = req.file.path;
-    const mimeType = req.file.mimetype;
-    const originalName = req.file.originalname;
+      if (!req.file) return res.status(400).json({ error: "No file uploaded" });
 
-    // Extract text using preprocessing and OCR
-    const extractedText = await extractText(filePath, mimeType);
+      const mimeType = req.file.mimetype;
+      const filePath = path.join(__dirname, '../uploads', req.file.originalname);
+      fs.writeFileSync(filePath, req.file.buffer); // Save file to disk
+      let extractedText = "";
 
-    // Analyze the document
-    const documentAnalysis = {
-      type: classifier.classify(extractedText),
-      location: extractLocation(extractedText),
-      amounts: extractAmounts(extractedText),
-      ...extractCaseDetails(extractedText),
-      filingDate: extractedText.match(/filed[\s:]+([^\n]+)/i)?.[1]?.trim(),
-      judgeName: extractedText.match(/judge[\s:]+([^\n]+)/i)?.[1]?.trim(),
-    };
+      const model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
+      const base64Data = Buffer.from(req.file.buffer).toString("base64");
+      let prompt = `
+      Analyze this document and provide the following details in JSON format:
+      {
+        "date": "Date of the document",
+        "type": "Type of document",
+        "plaintiffs": ["List of plaintiffs"],
+        "defendants": ["List of defendants"],
+        "claimants": ["List of claimants"],
+        "caseNumber": "The case number",
+        "judge": "The judges name",
+        "summary": "A brief summary of the document"
+      }
+      `;
 
-    let structuredData = {
-      title: "Legal Document Analysis",
-      extractedText,
-      analysis: documentAnalysis,
-      metadata: { 
-        uploadedAt: new Date(), 
-        type: mimeType,
-        confidence: classifier.getClassifications(extractedText)[0].value
-      },
-    };
+      if (mimeType.startsWith("image/")) {
+          prompt = `
+          Analyze this image and provide the following details in JSON format:
+          {
+            "date": "Date of the document",
+            "type": "Type of document",
+            "plaintiffs": ["List of plaintiffs"],
+            "defendants": ["List of defendants"],
+            "claimants": ["List of claimants"],
+            "caseNumber": "The case number",
+            "judge": "The judges name",
+            "summary": "A brief summary of the document"
+          }
+          `;
+      }
 
-    let format = "Json";
-    if (req.body.format === "XML") {
-      structuredData = convertToXML(structuredData);
-      format = "Xml";
-    }
+      const result = await model.generateContent([
+          {
+              inlineData: {
+                  data: base64Data,
+                  mimeType: mimeType,
+              },
+          },
+          prompt,
+      ]);
 
-    // Save document metadata using Prisma - now matches schema exactly
-    const document = await prisma.document.create({
-      data: {
-        originalName,
-        text: extractedText,
-        structuredData,
-        format,
-      },
-    });
+      extractedText = result.response.text();
+      if (!extractedText) {
+          extractedText = "Gemini was unable to process the provided document";
+      }
 
-    fs.unlinkSync(filePath); // Delete local file after processing
+      // Remove Markdown code block wrappers
+      extractedText = extractedText.replace(/```json\n/g, '').replace(/```/g, '');
 
-    res.status(201).json({ 
-      message: "File processed successfully", 
-      document,
-      analysis: documentAnalysis 
-    });
+      let documentAnalysis = {};
+      try {
+          documentAnalysis = JSON.parse(extractedText);
+      } catch (error) {
+          console.error("Error parsing Gemini response:", error);
+          documentAnalysis = { summary: extractedText }; // Fallback to raw text
+      }
+
+      let structuredData = {
+          title: "Legal Document Analysis",
+          extractedText,
+          analysis: documentAnalysis,
+          metadata: {
+              uploadedAt: new Date(),
+              type: mimeType,
+          },
+      };
+
+      let format = "Json";
+      if (req.body.format === "XML") {
+          structuredData = convertToXML(structuredData);
+          format = "Xml";
+      }
+
+      const document = await prisma.document.create({
+          data: {
+              originalName: req.file.originalname,
+              text: JSON.stringify(documentAnalysis),
+              structuredData,
+              format,
+          },
+      });
+
+      fs.unlinkSync(filePath);
+
+      res.status(201).json({
+          message: "File processed successfully",
+          document,
+          analysis: documentAnalysis,
+      });
   } catch (error) {
-    console.error("Document processing error:", error.message);
-    res.status(500).json({ error: "Failed to process the document" });
+      console.error("Document processing error:", error.message);
+      res.status(500).json({ error: "Failed to process the document" });
   }
 };
 
@@ -164,97 +215,3 @@ exports.deleteDocument = async (req, res) => {
     res.status(500).json({ error: error.message });
   }
 };
-
-// const Document = require("../models/documentModel");
-// const { extractText } = require("../services/ocrService");
-// const { convertToXML } = require("../utils/xmlFormatter");
-// const fs = require("fs");
-
-// exports.uploadDocument = async (req, res) => {
-//   try {
-//     if (!req.file) return res.status(400).json({ error: "No file uploaded" });
-
-//     const filePath = req.file.path;
-//     const mimeType = req.file.mimetype;
-
-//     // Extract text from PDF or image
-//     const extractedText = await extractText(filePath, mimeType);
-
-//     const structuredData = {
-//       title: "Scanned Document",
-//       extractedText,
-//       metadata: { uploadedAt: new Date(), type: mimeType },
-//     };
-
-//     let formattedData = structuredData;
-//     if (req.body.format === "XML") {
-//       formattedData = convertToXML(structuredData);
-//     }
-
-//     const document = await Document.create({
-//       originalName: req.file.originalname,
-//       text: extractedText,
-//       structuredData,
-//       format: req.body.format || "JSON",
-//     });
-
-//     fs.unlinkSync(filePath); // Delete file after processing
-
-//     res.status(201).json({ message: "File processed successfully", document });
-//   } catch (error) {
-//     res.status(500).json({ error: error.message });
-//   }
-// };
-
-// exports.getDocument = async (req, res) => {
-//   try {
-//     const document = await Document.findById(req.params.id);
-//     if (!document) return res.status(404).json({ error: "Document not found" });
-
-//     res.status(200).json(document);
-//   } catch (error) {
-//     res.status(500).json({ error: error.message });
-//   }
-// };
-
-// //Get all Documents
-// exports.getAllDocuments = async (req, res) => {
-//   try {
-//     const documents = await Document.find();
-
-//     if (documents.length === 0) return res.status(404).json({ error: "No documents found" });
-//     res.status(200).json(documents);
-//   } catch (error) {
-//     res.status(500).json({ error: error.message });
-//   }
-// };
-
-// // Update Document
-// exports.updateDocument = async (req, res) => {
-//   try {
-//     const updatedDocument = await Document.findByIdAndUpdate(
-//       req.params.id,
-//       req.body,
-//       { new: true }
-//     );
-
-//     if (!updatedDocument) return res.status(404).json({ error: "Document not found" });
-
-//     res.status(200).json(updatedDocument);
-//   } catch (error) {
-//     res.status(500).json({ error: error.message });
-//   }
-// };
-
-// // Delete Document
-// exports.deleteDocument = async (req, res) => {
-//   try {
-//     const deletedDocument = await Document.findByIdAndDelete(req.params.id);
-
-//     if (!deletedDocument) return res.status(404).json({ error: "Document not found" });
-
-//     res.status(200).json({ message: "Document deleted successfully" });
-//   } catch (error) {
-//     res.status(500).json({ error: error.message });
-//   }
-// };
