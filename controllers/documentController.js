@@ -73,6 +73,8 @@ exports.uploadDocument = async (req, res) => {
         "claimants": ["List of claimants"],
         "caseNumber": "The case number",
         "judge": "The judges name",
+        "amount": "The amount of the case",
+        "location": "The location of the case",
         "summary": "A brief summary of the document"
       }
       `;
@@ -88,6 +90,8 @@ exports.uploadDocument = async (req, res) => {
             "claimants": ["List of claimants"],
             "caseNumber": "The case number",
             "judge": "The judges name",
+            "amount": "The amount of the case",
+            "location": "The location of the case",
             "summary": "A brief summary of the document"
           }
           `;
