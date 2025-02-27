@@ -52,6 +52,7 @@ const extractCaseDetails = (text) => {
 // Upload Document
 exports.uploadDocument = async (req, res) => {
   try {
+      const userId = req.authPayload?.user?.id;
       const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 
       if (!req.file) return res.status(400).json({ error: "No file uploaded" });
@@ -143,6 +144,7 @@ exports.uploadDocument = async (req, res) => {
           data: {
               originalName: req.file.originalname,
               text: JSON.stringify(documentAnalysis),
+              userId,
               structuredData,
               format,
           },

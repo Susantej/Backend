@@ -28,4 +28,7 @@ router.get('/get-user/:userId', authMiddleware, authController.getUserById);
 // Get all users
 router.get('/all-users', authMiddleware, authController.getUsers);
 
+//Verify Email
+router.get('/verify-email/:token', authController.verifyEmail)
+
 module.exports = router;

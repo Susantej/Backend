@@ -3,6 +3,9 @@ const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const { PrismaClient } = require('@prisma/client');
 const prisma = new PrismaClient();
+const nodemailer = require('nodemailer');
+const crypto = require('crypto');
+
 
 const generateToken = (user) => {
   return jwt.sign({ id: user.id, email: user.email }, process.env.JWT_SECRET, {
@@ -10,6 +13,43 @@ const generateToken = (user) => {
   });
 };
 
+//Generate Random Password
+const generateRandomPassword = () => {
+  const length = 12;
+  const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+  let password = '';
+  for (let i = 0; i < length; i++) {
+    password += chars.charAt(Math.floor(Math.random() * chars.length));
+  }
+  return password;
+}
+
+// Generate verification token
+const generateVerificationToken = () => crypto.randomBytes(32).toString('hex');
+
+// Nodemailer transporter setup
+const transporter = nodemailer.createTransport({
+  service: 'gmail', // or your preferred service
+  auth: {
+    user: process.env.EMAIL_USER,
+    pass: process.env.EMAIL_PASS,
+  },
+});
+
+// Send verification email
+const sendVerificationEmail = async (email, token) => {
+  const verificationUrl = `${process.env.BASE_URL}/api/auth/verify-email/${token}`;
+  const mailOptions = {
+    from: 'Courtney Sessions',
+    to: email,
+    subject: 'Verify Your Email',
+    html: `<p style="font-size: 1.5em; font-weight: bold;">Click the link to verify your email on Courtney Sessions:</p>
+    Please click <a href="${verificationUrl}">this link</a> to verify your email`,
+  };
+  await transporter.sendMail(mailOptions);
+};
+
+// Register controller
 exports.register = async (req, res) => {
   try {
     const { email, password, firstName, lastName } = req.body;
@@ -20,15 +60,49 @@ exports.register = async (req, res) => {
     }
 
     const hashedPassword = await bcrypt.hash(password, 10);
+    const verificationToken = generateVerificationToken();
+
     const user = await prisma.user.create({
-      data: { email, password: hashedPassword, firstName, lastName },
+      data: {
+        email,
+        password: hashedPassword,
+        firstName,
+        lastName,
+        verified: false,
+        verificationToken,
+      },
     });
 
-    // const token = generateToken(user);
-    res.status(201).json({ user });
+    await sendVerificationEmail(email, verificationToken);
+
+    res.status(201).json({ message: 'User registered. Please verify your email.' });
   } catch (error) {
     console.error(error);
     res.status(500).json({ message: 'Registration failed', error });
+  }
+};
+
+exports.verifyEmail = async (req, res) => {
+  try {
+    const { token } = req.params;
+    const user = await prisma.user.findFirst({ where: { verificationToken: token } });
+
+    if (!user) {
+      return res.status(400).json({ message: 'Invalid or expired verification link.' });
+    }
+
+    // Instantly verify the user
+    await prisma.user.update({
+      where: { id: user.id },
+      data: { verified: true, verificationToken: null },
+    });
+
+    // Redirect user or send success response
+    // res.redirect(`${process.env.FRONTEND_URL}/login?verified=true`); 
+    res.status(200).json({ message: 'Email verified successfully.' });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ message: 'Email verification failed.', error });
   }
 };
 
@@ -73,22 +147,29 @@ exports.updateUser = async (req, res) => {
 //Reset Password
 exports.resetPassword = async (req, res) => {
   try {
-    //Get the email from the jwt
-    const email = req.authPayload?.user?.email;
-    const { password } = req.body;
+    const { email } = req.body;
     const user = await prisma.user.findUnique({ where: { email } });
 
     if (!user) {
       return res.status(404).json({ message: 'User not found' });
     }
 
-    const hashedPassword = await bcrypt.hash(password, 10);
+    const newPassword = generateRandomPassword();
+    const hashedPassword = await bcrypt.hash(newPassword, 10);
     const updatedUser = await prisma.user.update({
       where: { id: user.id },
       data: { password: hashedPassword },
     });
 
-    res.status(200).json(updatedUser);
+    const mailOptions = {
+      from: 'Courtney Sessions',
+      to: email,
+      subject: 'Reset Password',
+      text: `Your new password is ${newPassword}. Please login and change your password as soon as possible.`,
+    };
+    await transporter.sendMail(mailOptions);
+
+    res.status(200).json({ message: 'Password reset successfully. Please check your email for your new password.' });
   } catch (error) {
     console.error(error);
     res.status(500).json({ error: error.message });
