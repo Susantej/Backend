@@ -40,7 +40,7 @@ const transporter = nodemailer.createTransport({
 const sendVerificationEmail = async (email, token) => {
   const verificationUrl = `${process.env.BASE_URL}/api/auth/verify-email/${token}`;
   const mailOptions = {
-    from: 'Courtney Sessions',
+    from: `"Courtney Sessions" <support@courtneysessions.com>`,
     to: email,
     subject: 'Verify Your Email',
     html: `<p style="font-size: 1.5em; font-weight: bold;">Click the link to verify your email on Courtney Sessions:</p>
@@ -199,12 +199,20 @@ exports.updatePassword = async (req, res) => {
 //Delete Users
 exports.deleteUser = async (req, res) => {
   try {
-    const {userId} = req.body;
-    const deletedUser = await prisma.user.delete({
-      where: { id: userId },
-    });
+    const { userId } = req.body;
+    const user = await prisma.user.findUnique({ where: { id: userId } });
 
-    if(!deletedUser) {
+    if (!user) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+
+    // Delete all documents associated with the user
+    await prisma.document.deleteMany({ where: { userId } });
+
+    // Delete the user
+    const deletedUser = await prisma.user.delete({ where: { id: userId } });
+
+    if (!deletedUser) {
       return res.status(404).json({ message: 'User not found' });
     }
 
