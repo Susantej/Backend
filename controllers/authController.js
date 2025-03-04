@@ -40,7 +40,7 @@ const transporter = nodemailer.createTransport({
 const sendVerificationEmail = async (email, token) => {
   const verificationUrl = `${process.env.BASE_URL}/api/auth/verify-email/${token}`;
   const mailOptions = {
-    from: `"Courtney Sessions" <support@courtneysessions.com>`,
+    from: `"Courtney Sessions" <hello@courtneysessions.com>`,
     to: email,
     subject: 'Verify Your Email',
     html: `<p style="font-size: 1.5em; font-weight: bold;">Click the link to verify your email on Courtney Sessions:</p>
